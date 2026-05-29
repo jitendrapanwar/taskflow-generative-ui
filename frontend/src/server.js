@@ -65,6 +65,12 @@ function createAdapter() {
 const serviceAdapter = createAdapter();
 const runtime = new CopilotRuntime();
 
+// const runtime = new CopilotRuntime({
+//   remoteEndpoints: {
+//     url: "http://localhost:8000/copilotkit",
+//   },
+// });
+
 
 
 // ── KEY FIX: mount at root, NOT app.use('/copilotkit', handler) ───────────────

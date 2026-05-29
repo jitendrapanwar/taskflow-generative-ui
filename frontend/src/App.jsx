@@ -1,56 +1,69 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, createContext, useContext } from "react";
 import { CopilotKit } from "@copilotkit/react-core";
 import { CopilotSidebar } from "@copilotkit/react-ui";
-import { useCopilotReadable, useCopilotAction, useFrontendTool } from "@copilotkit/react-core";
+import { useCopilotReadable, useCopilotAction } from "@copilotkit/react-core";
+import { AddTodoCard, CompleteTodoCard, DeleteTodoCard, ClearCompletedCard, SetPriorityCard, StatsCard } from "./GenUI";
 import "@copilotkit/react-ui/styles.css";
 import "./App.css";
-import { TodoCard, StatsCard, Stat, ConfirmCard } from "./Components";
 
 // ─── CopilotKit config ────────────────────────────────────────────────────────
-// Priority: Cloud key > Node runtime URL > error
 const CLOUD_KEY = import.meta.env.VITE_COPILOT_CLOUD_API_KEY;
-const RUNTIME_URL = "http://localhost:4000/copilotkit";
-const BACKEND_API = "http://localhost:8000";
+const RUNTIME_URL = import.meta.env.VITE_RUNTIME_URL || "http://localhost:4000/copilotkit";
+const copilotProps = CLOUD_KEY ? { publicApiKey: CLOUD_KEY } : { runtimeUrl: RUNTIME_URL };
 
-const copilotProps = CLOUD_KEY
-  ? { publicApiKey: CLOUD_KEY }
-  : { runtimeUrl: RUNTIME_URL };
+// ─── GenUI mode context ───────────────────────────────────────────────────────
+const GenUIContext = createContext({ genUI: true });
+const useGenUI = () => useContext(GenUIContext);
 
-// ─── Todo App Inner Component ─────────────────────────────────────────────────
+
+
+// ─── Toggle button rendered inside the CopilotSidebar header ──────────────────
+function GenUIToggle({ genUI, onToggle }) {
+  return (
+    <button
+      onClick={onToggle}
+      title={genUI ? "Switch to text responses" : "Switch to UI responses"}
+      style={{
+        display: "flex", alignItems: "center", gap: 6,
+        padding: "4px 10px", borderRadius: 99,
+        border: `1px solid ${genUI ? "#7c6af755" : "rgba(255,255,255,0.12)"}`,
+        background: genUI ? "rgba(124,106,247,0.12)" : "transparent",
+        color: genUI ? "#a89af5" : "#6b6b80",
+        fontSize: 11, fontWeight: 600, cursor: "pointer",
+        letterSpacing: "0.04em", transition: "all 0.2s",
+        position: "absolute", top: 14, right: 14, zIndex: 10,
+      }}
+    >
+      <span style={{ fontSize: 13 }}>{genUI ? "◈" : "≡"}</span>
+      {genUI ? "UI" : "Text"}
+    </button>
+  );
+}
+
+// ─── Todo App ─────────────────────────────────────────────────────────────────
 function TodoApp() {
-  const [todos, setTodos] = useState([]);
+  const { genUI, setGenUI } = useGenUI();
+
+  const [todos, setTodos] = useState([
+    { id: 1, text: "Buy groceries", done: false, priority: "medium" },
+    { id: 2, text: "Read a book", done: false, priority: "low" },
+    { id: 3, text: "Exercise for 30 minutes", done: true, priority: "high" },
+  ]);
   const [newTodo, setNewTodo] = useState("");
   const [filter, setFilter] = useState("all");
-  const [loading, setLoading] = useState(true);
 
-  // ── Fetch todos on mount ──────────────────────────────────────────────────
-  useEffect(() => {
-    fetchTodos();
-  }, []);
+  // Keep cleared count in a ref so the ClearCompleted card can read it
+  const [lastClearedCount, setLastClearedCount] = useState(0);
 
-  const fetchTodos = async () => {
-    try {
-      setLoading(true);
-      const res = await fetch(`${BACKEND_API}/todos`);
-      if (!res.ok) throw new Error("Failed to fetch todos");
-      const data = await res.json();
-      setTodos(data);
-    } catch (err) {
-      console.error("❌ Error fetching todos:", err);
-      setTodos([]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // ── Give AI visibility into current todos ──────────────────────────────────
   useCopilotReadable({
-    description: "The current list of todo items with their ID, text, done status, and priority",
+    description: "Current todo list with ID, text, done status, priority",
     value: todos,
   });
 
-  // ── AI Actions ────────────────────────────────────────────────────────────
-  useFrontendTool({
+  // Conditionally attach render prop based on genUI toggle
+  const maybeRender = (fn) => genUI ? fn : undefined;
+
+  useCopilotAction({
     name: "addTodo",
     description: "Add a new todo item to the list",
     parameters: [
@@ -58,25 +71,10 @@ function TodoApp() {
       { name: "priority", type: "string", description: "Priority: low, medium, or high", required: false },
     ],
     handler: async ({ text, priority = "medium" }) => {
-      try {
-        const id = Date.now();
-        const res = await fetch(`${BACKEND_API}/todos`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id, text, done: false, priority }),
-        });
-        if (!res.ok) throw new Error("Failed to add todo");
-        await fetchTodos();
-        return `Added: "${text}" (${priority} priority, id=${id})`;
-      } catch (err) {
-        console.error("❌ Error adding todo:", err);
-        return `Failed to add todo: ${err.message}`;
-      }
+      setTodos(prev => [...prev, { id: Date.now(), text, done: false, priority }]);
+      return `Added: "${text}" (${priority} priority)`;
     },
-    render: ({ args, status }) => (
-      <TodoCard text={args.text} priority={args.priority} status={status} />
-    ),
-
+    render: maybeRender(({ args, status }) => <AddTodoCard args={args} status={status} />),
   });
 
   useCopilotAction({
@@ -87,20 +85,12 @@ function TodoApp() {
       { name: "done", type: "boolean", description: "true = done", required: true },
     ],
     handler: async ({ id, done }) => {
-      try {
-        const res = await fetch(`${BACKEND_API}/todos/${id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ done }),
-        });
-        if (!res.ok) throw new Error("Failed to update todo");
-        await fetchTodos();
-        return `Todo #${id} marked as ${done ? "done ✓" : "undone ○"}`;
-      } catch (err) {
-        console.error("❌ Error updating todo:", err);
-        return `Failed to update todo: ${err.message}`;
-      }
+      setTodos(prev => prev.map(t => t.id === id ? { ...t, done } : t));
+      return `Todo #${id} marked as ${done ? "done ✓" : "undone ○"}`;
     },
+    render: maybeRender(({ args, status }) => (
+      <CompleteTodoCard args={args} status={status} todos={todos} />
+    )),
   });
 
   useCopilotAction({
@@ -110,41 +100,15 @@ function TodoApp() {
       { name: "id", type: "number", description: "The todo item ID", required: true },
     ],
     handler: async ({ id }) => {
-      try {
-        const res = await fetch(`${BACKEND_API}/todos/${id}`, {
-          method: "DELETE",
-        });
-        if (!res.ok) throw new Error("Failed to delete todo");
-        await fetchTodos();
-        return `Deleted todo #${id}`;
-      } catch (err) {
-        console.error("❌ Error deleting todo:", err);
-        return `Failed to delete todo: ${err.message}`;
-      }
+      setTodos(prev => prev.filter(t => t.id !== id));
+      return `Deleted todo #${id}`;
     },
-    render: ({ args, status }) => {
-      const todo = todos.find(t => t.id === args.id);
-      return (
-        <ConfirmCard
-          id={args.id}
-          text={todo?.text ?? `#${args.id}`}
-          status={status}
-          onConfirm={async (id) => {
-            try {
-              const res = await fetch(`${BACKEND_API}/todos/${id}`, {
-                method: "DELETE",
-              });
-              if (!res.ok) throw new Error("Failed to delete todo");
-              await fetchTodos();
-              return `Deleted todo #${id}`;
-            } catch (err) {
-              console.error("❌ Error deleting todo:", err);
-              return `Failed to delete todo: ${err.message}`;
-            }
-          }}
-        />
-      );
-    },
+    render: maybeRender(({ args, status }) => (
+      <DeleteTodoCard
+        args={args} status={status} todos={todos}
+        onConfirm={(id) => setTodos(p => p.filter(t => t.id !== id))}
+      />
+    )),
   });
 
   useCopilotAction({
@@ -152,20 +116,14 @@ function TodoApp() {
     description: "Remove all completed todo items",
     parameters: [],
     handler: async () => {
-      try {
-        const count = todos.filter(t => t.done).length;
-        for (const todo of todos) {
-          if (todo.done) {
-            await fetch(`${BACKEND_API}/todos/${todo.id}`, { method: "DELETE" });
-          }
-        }
-        await fetchTodos();
-        return `Cleared ${count} completed todo(s)`;
-      } catch (err) {
-        console.error("❌ Error clearing completed:", err);
-        return `Failed to clear completed: ${err.message}`;
-      }
+      const count = todos.filter(t => t.done).length;
+      setLastClearedCount(count);
+      setTodos(prev => prev.filter(t => !t.done));
+      return `Cleared ${count} completed todo(s)`;
     },
+    render: maybeRender(({ status }) => (
+      <ClearCompletedCard status={status} count={lastClearedCount} />
+    )),
   });
 
   useCopilotAction({
@@ -173,84 +131,41 @@ function TodoApp() {
     description: "Change the priority of a todo item",
     parameters: [
       { name: "id", type: "number", description: "The todo item ID", required: true },
-      { name: "priority", type: "string", description: "low, medium, or high", required: true },
+      { name: "priority", type: "string", description: "low, medium, high", required: true },
     ],
     handler: async ({ id, priority }) => {
-      try {
-        const res = await fetch(`${BACKEND_API}/todos/${id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ priority }),
-        });
-        if (!res.ok) throw new Error("Failed to update priority");
-        await fetchTodos();
-        return `Set todo #${id} priority to ${priority}`;
-      } catch (err) {
-        console.error("❌ Error updating priority:", err);
-        return `Failed to update priority: ${err.message}`;
-      }
+      setTodos(prev => prev.map(t => t.id === id ? { ...t, priority } : t));
+      return `Set todo #${id} priority to ${priority}`;
     },
+    render: maybeRender(({ args, status }) => (
+      <SetPriorityCard args={args} status={status} todos={todos} />
+    )),
   });
+
   useCopilotAction({
     name: "getTodos",
     description: "Show a stats summary of all todos",
     parameters: [],
-    handler: async () => { },
-    render: ({ status }) => (
-      <StatsCard todos={todos} status={status} />
-    ),
+    handler: async () => {
+      const done = todos.filter(t => t.done).length;
+      return `You have ${todos.length} todos — ${done} done, ${todos.length - done} remaining.`;
+    },
+    render: maybeRender(({ status }) => <StatsCard status={status} todos={todos} />),
   });
 
-  // ── Local handlers ─────────────────────────────────────────────────────────
-  const addTodo = useCallback(async () => {
+  // ── Local UI handlers ────────────────────────────────────────────────────────
+  const addTodo = useCallback(() => {
     if (!newTodo.trim()) return;
-    try {
-      const id = Date.now();
-      const res = await fetch(`${BACKEND_API}/todos`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, text: newTodo.trim(), done: false, priority: "medium" }),
-      });
-      if (!res.ok) throw new Error("Failed to add todo");
-      setNewTodo("");
-      await fetchTodos();
-    } catch (err) {
-      console.error("❌ Error adding todo:", err);
-    }
+    setTodos(prev => [...prev, { id: Date.now(), text: newTodo.trim(), done: false, priority: "medium" }]);
+    setNewTodo("");
   }, [newTodo]);
 
-  const toggleTodo = useCallback(async (id) => {
-    try {
-      const todo = todos.find(t => t.id === id);
-      if (!todo) return;
-      const res = await fetch(`${BACKEND_API}/todos/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ done: !todo.done }),
-      });
-      if (!res.ok) throw new Error("Failed to update todo");
-      await fetchTodos();
-    } catch (err) {
-      console.error("❌ Error updating todo:", err);
-    }
-  }, [todos]);
-
-  const deleteTodo = useCallback(async (id) => {
-    try {
-      const res = await fetch(`${BACKEND_API}/todos/${id}`, {
-        method: "DELETE",
-      });
-      if (!res.ok) throw new Error("Failed to delete todo");
-      await fetchTodos();
-    } catch (err) {
-      console.error("❌ Error deleting todo:", err);
-    }
-  }, []);
+  const toggleTodo = id => setTodos(prev => prev.map(t => t.id === id ? { ...t, done: !t.done } : t));
+  const deleteTodo = id => setTodos(prev => prev.filter(t => t.id !== id));
 
   const filtered = todos.filter(t =>
     filter === "active" ? !t.done : filter === "done" ? t.done : true
   );
-
   const priorities = { high: "#ef4444", medium: "#f59e0b", low: "#22c55e" };
   const remaining = todos.filter(t => !t.done).length;
 
@@ -267,9 +182,20 @@ function TodoApp() {
             <span className="stat-badge done">{todos.length - remaining} done</span>
           </div>
         </div>
-        <p className="header-hint">
-          {CLOUD_KEY ? "☁️ CopilotKit Cloud" : `🖥️ Runtime: ${RUNTIME_URL}`}
-        </p>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6 }}>
+          <p className="header-hint">
+            {CLOUD_KEY ? "☁️ CopilotKit Cloud" : `🖥️ ${RUNTIME_URL}`}
+          </p>
+          {/* Toggle visible in the main app too */}
+          <button
+            className={`mode-toggle ${genUI ? "active" : ""}`}
+            onClick={() => setGenUI(v => !v)}
+            title="Toggle AI response mode"
+          >
+            <span>{genUI ? "◈" : "≡"}</span>
+            {genUI ? "UI mode" : "Text mode"}
+          </button>
+        </div>
       </header>
 
       <main className="main-content">
@@ -280,12 +206,9 @@ function TodoApp() {
             value={newTodo}
             onChange={e => setNewTodo(e.target.value)}
             onKeyDown={e => e.key === "Enter" && addTodo()}
-            disabled={loading}
           />
-          <button className="add-btn" onClick={addTodo} disabled={loading}><span>+</span></button>
+          <button className="add-btn" onClick={addTodo}><span>+</span></button>
         </div>
-
-        {loading && <div style={{ padding: "1rem", textAlign: "center", color: "#999" }}>⏳ Loading todos...</div>}
 
         <div className="filter-bar">
           {["all", "active", "done"].map(f => (
@@ -327,20 +250,28 @@ function TodoApp() {
   );
 }
 
-// ─── Root ─────────────────────────────────────────────────────────────────────
+// ─── Root — owns genUI state, injects via context ─────────────────────────────
 export default function App() {
+  const [genUI, setGenUI] = useState(true);
+
   return (
-    <CopilotKit {...copilotProps}>
-      <CopilotSidebar
-        defaultOpen={false}
-        labels={{
-          title: "TaskFlow AI",
-          initial: "Hi! I can help manage your tasks.\n\nTry:\n• *\"Add buy milk with high priority\"*\n• *\"Complete task #1\"*\n• *\"Delete task #2\"*\n• *\"What are my todos?\"*\n• *\"Clear all completed tasks\"*",
-        }}
-        clickOutsideToClose={false}
-      >
-        <TodoApp />
-      </CopilotSidebar>
-    </CopilotKit>
+    <GenUIContext.Provider value={{ genUI, setGenUI }}>
+      <CopilotKit {...copilotProps}>
+        <CopilotSidebar
+          defaultOpen={false}
+          labels={{
+            title: "TaskFlow AI",
+            initial: "Hi! I can help manage your tasks.\n\nTry:\n• *\"Add buy milk with high priority\"*\n• *\"Show my stats\"*\n• *\"Complete task #1\"*\n\nToggle **UI / Text** mode using the button in the top-right.",
+          }}
+          clickOutsideToClose={false}
+          // Inject the toggle button into the sidebar header area
+          Header={() => (
+            <GenUIToggle genUI={genUI} onToggle={() => setGenUI(v => !v)} />
+          )}
+        >
+          <TodoApp />
+        </CopilotSidebar>
+      </CopilotKit>
+    </GenUIContext.Provider>
   );
 }
