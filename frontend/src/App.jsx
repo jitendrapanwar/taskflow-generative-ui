@@ -227,7 +227,14 @@ function TodoApp() {
       .finally(() => setLoading(false));
   }, []);
 
-  const refresh = () => api.getAll().then(setTodos).catch(() => { });
+  // ── refresh: fetches CSV, updates state, returns fresh list ──────────────
+  // Returning the fresh list lets handlers use it immediately in their
+  // return string — before React has re-rendered with the new state.
+  const refresh = async () => {
+    const fresh = await api.getAll().catch(() => todos);
+    setTodos(fresh);
+    return fresh;
+  };
 
   // ── AI reads the todo list ─────────────────────────────────────────────────
   useCopilotReadable({
@@ -238,7 +245,13 @@ function TodoApp() {
   // ── Toggle: undefined render = plain text fallback, fn = UI card ──────────
   const maybeRender = (fn) => genUI ? fn : undefined;
 
-  // ── AI actions — call REST API, then refresh UI ────────────────────────────
+  // ── AI actions ────────────────────────────────────────────────────────────
+  // Each handler:
+  //   1. Optimistically updates local state FIRST (useCopilotReadable sees it instantly)
+  //   2. Persists to CSV via REST API
+  //   3. Calls refresh() to confirm CSV matches — uses returned fresh list
+  //      for accurate counts in the response string
+
   useCopilotAction({
     name: "addTodo",
     description: "Add a new todo (saved to CSV)",
@@ -247,9 +260,15 @@ function TodoApp() {
       { name: "priority", type: "string", description: "low/medium/high", required: false },
     ],
     handler: async ({ text, priority = "medium" }) => {
+      // 1. Optimistic update
+      const tempId = Date.now();
+      setTodos(prev => [...prev, { id: tempId, text, done: false, priority }]);
+      // 2. Persist
       await api.add(text, priority);
-      await refresh();
-      return `Added "${text}" with ${priority} priority`;
+      // 3. Confirm from CSV (replaces temp item with real CSV id)
+      const fresh = await refresh();
+      const done = fresh.filter(t => t.done).length;
+      return `Added "${text}" (${priority}). You now have ${fresh.length} todos, ${done} completed.`;
     },
     render: maybeRender(({ args, status }) =>
       <AddTodoCard args={args} status={status} />
@@ -264,9 +283,15 @@ function TodoApp() {
       { name: "done", type: "boolean", description: "true = done", required: true },
     ],
     handler: async ({ id, done }) => {
+      // 1. Optimistic update — AI sees new count immediately
+      setTodos(prev => prev.map(t => t.id === id ? { ...t, done } : t));
+      // 2. Persist
       await api.update(id, { done });
-      await refresh();
-      return `Todo #${id} marked as ${done ? "done ✓" : "undone ○"}`;
+      // 3. Confirm and build accurate response
+      const fresh = await refresh();
+      const completed = fresh.filter(t => t.done).length;
+      const remaining = fresh.filter(t => !t.done).length;
+      return `Todo #${id} marked ${done ? "done ✓" : "undone ○"}. ${completed} completed, ${remaining} remaining.`;
     },
     render: maybeRender(({ args, status }) =>
       <CompleteTodoCard args={args} status={status} todos={todos} />
@@ -280,9 +305,13 @@ function TodoApp() {
       { name: "id", type: "number", description: "Todo ID", required: true },
     ],
     handler: async ({ id }) => {
+      // 1. Optimistic update
+      setTodos(prev => prev.filter(t => t.id !== id));
+      // 2. Persist
       await api.remove(id);
-      await refresh();
-      return `Deleted todo #${id}`;
+      // 3. Confirm
+      const fresh = await refresh();
+      return `Deleted todo #${id}. ${fresh.length} todos remaining.`;
     },
     render: maybeRender(({ args, status }) =>
       <DeleteTodoCard args={args} status={status} todos={todos}
@@ -297,9 +326,13 @@ function TodoApp() {
     handler: async () => {
       const count = todos.filter(t => t.done).length;
       setLastCleared(count);
+      // 1. Optimistic update
+      setTodos(prev => prev.filter(t => !t.done));
+      // 2. Persist
       await api.clearCompleted();
-      await refresh();
-      return `Cleared ${count} completed todo(s)`;
+      // 3. Confirm
+      const fresh = await refresh();
+      return `Cleared ${count} completed todo(s). ${fresh.length} active tasks remain.`;
     },
     render: maybeRender(({ status }) =>
       <ClearCompletedCard status={status} count={lastCleared} />
@@ -314,7 +347,11 @@ function TodoApp() {
       { name: "priority", type: "string", description: "low/medium/high", required: true },
     ],
     handler: async ({ id, priority }) => {
+      // 1. Optimistic update
+      setTodos(prev => prev.map(t => t.id === id ? { ...t, priority } : t));
+      // 2. Persist
       await api.update(id, { priority });
+      // 3. Confirm
       await refresh();
       return `Set todo #${id} priority to ${priority}`;
     },
@@ -328,31 +365,48 @@ function TodoApp() {
     description: "Show a stats summary of all todos",
     parameters: [],
     handler: async () => {
-      const done = todos.filter(t => t.done).length;
-      return `${todos.length} todos — ${done} done, ${todos.length - done} remaining.`;
+      // Always fetch fresh from CSV so counts are never stale
+      const fresh = await refresh();
+      const done = fresh.filter(t => t.done).length;
+      const remaining = fresh.filter(t => !t.done).length;
+      return `${fresh.length} todos — ${done} completed, ${remaining} remaining.`;
     },
     render: maybeRender(({ status }) =>
       <StatsCard status={status} todos={todos} />
     ),
   });
 
-  // ── Manual UI handlers — also persist via API ──────────────────────────────
+  // ── Manual UI handlers ────────────────────────────────────────────────────
+  // Pattern:
+  //   1. setTodos(optimistic) → instant visual feedback
+  //   2. await api.*()        → persist to CSV
+  //   3. await refresh()      → fetch confirmed data from API → setTodos(fresh)
+  //                             useCopilotReadable is now synced with actual CSV
+  //
+  // Awaiting refresh() is the key — it guarantees useCopilotReadable holds
+  // confirmed API data before the handler ends. React will have re-rendered
+  // with the fresh state by the time the user types their next AI message.
+
   const addTodo = useCallback(async () => {
     if (!newTodo.trim()) return;
-    await api.add(newTodo.trim(), "medium");
-    await refresh();
+    const text = newTodo.trim();
     setNewTodo("");
+    setTodos(prev => [...prev, { id: Date.now(), text, done: false, priority: "medium" }]);
+    await api.add(text, "medium");
+    await refresh(); // ← awaited: readable syncs with confirmed CSV data
   }, [newTodo]);
 
   const toggleTodo = async (id) => {
     const todo = todos.find(t => t.id === id);
+    setTodos(prev => prev.map(t => t.id === id ? { ...t, done: !todo.done } : t));
     await api.update(id, { done: !todo.done });
-    await refresh();
+    await refresh(); // ← awaited: readable syncs with confirmed CSV data
   };
 
   const deleteTodo = async (id) => {
+    setTodos(prev => prev.filter(t => t.id !== id));
     await api.remove(id);
-    await refresh();
+    await refresh(); // ← awaited: readable syncs with confirmed CSV data
   };
 
   const filtered = todos.filter(t =>
@@ -422,7 +476,11 @@ function TodoApp() {
         {todos.some(t => t.done) && (
           <div className="footer-actions">
             <button className="clear-btn"
-              onClick={async () => { await api.clearCompleted(); await refresh(); }}>
+              onClick={async () => {
+                setTodos(prev => prev.filter(t => !t.done));
+                await api.clearCompleted();
+                await refresh();
+              }}>
               Clear completed
             </button>
           </div>
