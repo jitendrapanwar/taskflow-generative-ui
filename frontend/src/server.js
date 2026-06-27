@@ -2,10 +2,27 @@
  * TaskFlow AI — CopilotKit Node.js Runtime Server
  * No remoteEndpoints needed — frontend handles all AI actions.
  */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { config } from "dotenv";
 import express from "express";
 import cors from "cors";
-config()
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const envCandidates = [
+  path.resolve(__dirname, "..", ".env"),
+  path.resolve(__dirname, "..", "..", ".env"),
+  path.resolve(process.cwd(), ".env"),
+];
+
+const resolvedEnvPath = envCandidates.find((candidate) => fs.existsSync(candidate));
+if (resolvedEnvPath) {
+  config({ path: resolvedEnvPath });
+} else {
+  config();
+}
 
 import {
   CopilotRuntime,
@@ -13,6 +30,15 @@ import {
   AnthropicAdapter,
   copilotRuntimeNodeExpressEndpoint,
 } from "@copilotkit/runtime";
+
+const originalWarn = console.warn.bind(console);
+console.warn = (...args) => {
+  const message = args.join(" ");
+  if (message.includes("AI SDK Warning: System messages")) {
+    return;
+  }
+  originalWarn(...args);
+};
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -25,8 +51,10 @@ app.use(cors({
 }));
 
 function createAdapter() {
+  console.log(`🤖  OpenAI API Key found`);
   if (process.env.OPENAI_API_KEY) {
-    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+    const model = process.env.OPENAI_MODEL || "gpt-4o-mini-2024-07-18";
     console.log(`🤖  OpenAI — ${model}`);
     return new OpenAIAdapter({ model });
   }
@@ -35,7 +63,7 @@ function createAdapter() {
     console.log(`🤖  Anthropic — ${model}`);
     return new AnthropicAdapter({ model });
   }
-  throw new Error("❌  Set OPENAI_API_KEY or ANTHROPIC_API_KEY in runtime/.env");
+  throw new Error("❌  Set OPENAI_API_KEY or ANTHROPIC_API_KEY in frontend/.env or your shell environment");
 }
 
 // No remoteEndpoints — Python is a plain REST API, not a CopilotKit endpoint
